@@ -16,6 +16,7 @@ export type SessionStatus =
   | 'connecting'
   | 'listening'
   | 'translating'
+  | 'paused'
   | 'error'
   | 'reconnecting';
 
@@ -73,6 +74,7 @@ export const REALTIME_EVENTS = {
   OUTPUT_TRANSCRIPT_DELTA: 'session.output_transcript.delta',
   INPUT_TRANSCRIPT_DONE: 'session.input_transcript.done',
   OUTPUT_TRANSCRIPT_DONE: 'session.output_transcript.done',
+  OUTPUT_AUDIO_DONE: 'session.output_audio.done',
   SESSION_CREATED: 'session.created',
   SESSION_UPDATED: 'session.updated',
   SESSION_CLOSED: 'session.closed',
@@ -100,7 +102,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sourceLang: 'en-AU',
   targetLang: 'hi',
   micDeviceId: null,
-  apiBaseUrl: 'http://localhost:3001',
+  apiBaseUrl: '',
   darkMode: true,
 };
 

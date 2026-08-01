@@ -15,7 +15,7 @@ export default function App() {
   const sessionState = useUIStore((s) => s.sessionState);
   const showSettings = useUIStore((s) => s.showSettings);
   const toggleSettings = useUIStore((s) => s.toggleSettings);
-  const { toggleSession, swapAndRestart, isSessionActive, clearConversation: clearAll } =
+  const { toggleSession, finishSegment, swapAndRestart, isSessionActive, isPaused, clearConversation: clearAll } =
     useTranslationSession();
 
   const state = sessionState ?? {
@@ -31,7 +31,8 @@ export default function App() {
   };
 
   const handleCopy = () => {
-    if (state.translatedText) void navigator.clipboard.writeText(state.translatedText);
+    const text = state.partialTranslation || state.translatedText;
+    if (text) void navigator.clipboard.writeText(text);
   };
 
   const handleClear = () => {
@@ -91,15 +92,22 @@ export default function App() {
 
         <TranslationPanel
           text={state.translatedText}
+          partial={state.partialTranslation}
           lang={getLangLabel(settings.targetLang)}
-          status={state.status}
           onCopy={handleCopy}
           isActive={isSessionActive}
+          isTranslating={state.status === 'translating'}
         />
 
         <ConversationHistory turns={state.turns} onClear={handleClear} />
 
-        <StatusBar state={state} isActive={isSessionActive} onToggle={() => void toggleSession()} />
+        <StatusBar
+          state={state}
+          isActive={isSessionActive}
+          isPaused={isPaused}
+          onToggle={() => void toggleSession()}
+          onFinishSegment={finishSegment}
+        />
       </main>
 
       {showSettings && <SettingsPanel onClose={toggleSettings} />}

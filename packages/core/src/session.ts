@@ -7,12 +7,9 @@ import {
   type SessionConfig,
   type SessionState,
   type SessionStatus,
-  type UtteranceReadyEvent,
 } from '@live-translator/shared';
 import { LatencyTracker } from './latency-tracker.js';
-import { TranslationCoordinator } from './translation-coordinator.js';
 import { TurnBuffer } from './turn-buffer.js';
-import { UtteranceDetector } from './utterance-detector.js';
 
 export type SessionEventHandler = (state: SessionState) => void;
 
@@ -20,8 +17,6 @@ export interface TranslationSessionOptions {
   config?: Partial<SessionConfig>;
   onStateChange?: SessionEventHandler;
   onTurnComplete?: (turn: DialogueTurn) => void;
-  /** Fired when a sentence is complete and ready for final translation */
-  onUtteranceReady?: (event: UtteranceReadyEvent) => void;
 }
 
 function createInitialState(): SessionState {
@@ -44,29 +39,22 @@ export class TranslationSession {
   private contextBuffer: TurnBuffer;
   private completedTurns: DialogueTurn[] = [];
   private latencyTracker: LatencyTracker;
-  private coordinator: TranslationCoordinator;
-  private utteranceDetector: UtteranceDetector;
   private onStateChange?: SessionEventHandler;
   private onTurnComplete?: (turn: DialogueTurn) => void;
-  private onUtteranceReady?: (event: UtteranceReadyEvent) => void;
   private currentSourceText = '';
-  /** Internal draft from Realtime stream — never shown in UI */
-  private draftTranslation = '';
-  private awaitingCommit = false;
+  private currentTranslationText = '';
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 5;
+  private segmentLocked = false;
+  private finalizedSourceText = '';
+  private finalizedTranslationText = '';
 
   constructor(options: TranslationSessionOptions = {}) {
     this.config = { ...DEFAULT_SESSION_CONFIG, ...options.config };
     this.contextBuffer = new TurnBuffer(this.config.maxTurns);
     this.latencyTracker = new LatencyTracker();
-    this.coordinator = new TranslationCoordinator();
-    this.utteranceDetector = new UtteranceDetector(this.config.silenceDurationMs, () => {
-      this.commitUtteranceFromSilence();
-    });
     this.onStateChange = options.onStateChange;
     this.onTurnComplete = options.onTurnComplete;
-    this.onUtteranceReady = options.onUtteranceReady;
   }
 
   getState(): SessionState {
@@ -104,6 +92,9 @@ export class TranslationSession {
   }
 
   handleRealtimeEvent(event: Record<string, unknown>): void {
+    // Ignore streaming updates while paused or segment is being finalized
+    if (this.state.status === 'paused' || this.segmentLocked) return;
+
     const type = event.type as string;
 
     switch (type) {
@@ -114,9 +105,10 @@ export class TranslationSession {
         this.handleOutputDelta(event as unknown as RealtimeTranscriptDelta);
         break;
       case REALTIME_EVENTS.INPUT_TRANSCRIPT_DONE:
-        this.handleInputDone(event);
+        this.handleInputDone();
         break;
       case REALTIME_EVENTS.OUTPUT_TRANSCRIPT_DONE:
+      case REALTIME_EVENTS.OUTPUT_AUDIO_DONE:
         this.handleOutputDone();
         break;
       case REALTIME_EVENTS.ERROR:
@@ -127,19 +119,113 @@ export class TranslationSession {
     }
   }
 
-  /** Apply a refined final translation — ignores stale utterance IDs */
-  applyFinalTranslation(utteranceId: number, translatedText: string, sourceText: string): void {
-    if (!this.coordinator.isActiveTranslation(utteranceId)) {
-      return;
+  private handleInputDelta(event: RealtimeTranscriptDelta): void {
+    const delta = typeof event.delta === 'string' ? event.delta : '';
+    if (!delta) return;
+    this.currentSourceText += delta;
+    this.patchState({
+      partialSource: this.currentSourceText,
+      status: 'listening',
+    });
+  }
+
+  private handleOutputDelta(_event: RealtimeTranscriptDelta): void {
+    // Deferred translation: ignore realtime output; batch translate on segment boundary
+  }
+
+  private handleInputDone(): void {
+    this.latencyTracker.markTurnEnd();
+    const sourceText = this.currentSourceText.trim();
+    if (sourceText) {
+      this.patchState({
+        sourceTranscript: sourceText,
+        partialSource: '',
+      });
+    }
+    this.currentSourceText = '';
+  }
+
+  private handleOutputDone(): void {
+    // Deferred translation: do not auto-commit streaming output
+  }
+
+  /** Snapshot source text and prepare for batch translation (Space press). */
+  beginSegmentFinalize(): string | null {
+    const sourceText = (
+      this.state.partialSource ||
+      this.state.sourceTranscript ||
+      this.currentSourceText
+    ).trim();
+
+    this.finalizedSourceText = sourceText;
+    this.finalizedTranslationText = '';
+    this.currentTranslationText = '';
+    this.segmentLocked = true;
+
+    this.patchState({
+      partialTranslation: '',
+      translatedText: '',
+      status: sourceText ? 'translating' : 'paused',
+      error: sourceText ? null : 'No speech detected — speak, then press Space',
+    });
+
+    return sourceText || null;
+  }
+
+  /** Apply batch translation result from /api/translate. */
+  applyFinalTranslation(text: string): void {
+    if (!this.segmentLocked) return;
+
+    this.finalizedTranslationText = text.trim();
+    this.latencyTracker.markTranslationDisplayed();
+    this.patchState({
+      translatedText: text.trim(),
+      partialTranslation: '',
+      status: 'paused',
+      error: null,
+    });
+  }
+
+  /** Commit finalized segment to history (Space release). */
+  commitFinalizedSegment(options?: {
+    keepStatus?: SessionStatus;
+    sourceLang?: AppLanguage;
+    targetLang?: AppLanguage;
+  }): DialogueTurn | null {
+    if (!this.segmentLocked) {
+      return null;
     }
 
-    const latencyMs = this.latencyTracker.markTranslationDisplayed();
+    const sourceText = this.finalizedSourceText;
+    const translatedText = this.finalizedTranslationText;
+
+    this.segmentLocked = false;
+    this.finalizedSourceText = '';
+    this.finalizedTranslationText = '';
+    this.currentSourceText = '';
+    this.currentTranslationText = '';
+
+    if (!sourceText && !translatedText) {
+      this.patchState({
+        sourceTranscript: '',
+        translatedText: '',
+        partialSource: '',
+        partialTranslation: '',
+        status: options?.keepStatus ?? 'listening',
+        error: null,
+      });
+      return null;
+    }
+
+    const sourceLang = options?.sourceLang ?? this.config.sourceLang;
+    const targetLang = options?.targetLang ?? this.config.targetLang;
+    const latencyMs = this.latencyTracker.getP50();
     const turn: DialogueTurn = {
       id: crypto.randomUUID(),
-      sourceText,
-      translatedText,
-      sourceLang: this.config.sourceLang,
-      targetLang: this.config.targetLang,
+      sourceText: sourceText || '(no source transcript)',
+      translatedText: translatedText || '(no translation yet)',
+      sourceLang,
+      targetLang,
       completedAt: Date.now(),
       latencyMs: latencyMs ?? 0,
     };
@@ -149,91 +235,126 @@ export class TranslationSession {
     this.onTurnComplete?.(turn);
 
     this.patchState({
-      sourceTranscript: sourceText,
-      translatedText,
+      sourceTranscript: '',
+      translatedText: '',
+      partialSource: '',
+      partialTranslation: '',
+      turns: [...this.completedTurns],
+      latencyMs,
+      status: options?.keepStatus ?? 'listening',
+      error: null,
+    });
+
+    return turn;
+  }
+
+  isSegmentLocked(): boolean {
+    return this.segmentLocked;
+  }
+
+  getFinalizedSourceText(): string {
+    return this.finalizedSourceText;
+  }
+
+  /**
+   * Commit whatever is currently on screen into conversation history,
+   * then clear the live Original/Translation panels.
+   */
+  commitCurrentTurn(options?: {
+    keepStatus?: SessionStatus;
+    sourceLang?: AppLanguage;
+    targetLang?: AppLanguage;
+  }): DialogueTurn | null {
+    const sourceText = (
+      this.state.partialSource ||
+      this.state.sourceTranscript ||
+      this.currentSourceText
+    ).trim();
+    const translatedText = (
+      this.state.partialTranslation ||
+      this.state.translatedText ||
+      this.currentTranslationText
+    ).trim();
+
+    this.currentSourceText = '';
+    this.currentTranslationText = '';
+
+    if (!sourceText && !translatedText) {
+      this.patchState({
+        sourceTranscript: '',
+        translatedText: '',
+        partialSource: '',
+        partialTranslation: '',
+        status: options?.keepStatus ?? this.state.status,
+      });
+      return null;
+    }
+
+    const sourceLang = options?.sourceLang ?? this.config.sourceLang;
+    const targetLang = options?.targetLang ?? this.config.targetLang;
+    const latencyMs = this.latencyTracker.markTranslationDisplayed();
+    const turn: DialogueTurn = {
+      id: crypto.randomUUID(),
+      sourceText: sourceText || '(no source transcript)',
+      translatedText: translatedText || '(no translation yet)',
+      sourceLang,
+      targetLang,
+      completedAt: Date.now(),
+      latencyMs: latencyMs ?? 0,
+    };
+
+    this.contextBuffer.add(turn);
+    this.completedTurns.push(turn);
+    this.onTurnComplete?.(turn);
+
+    this.patchState({
+      sourceTranscript: '',
+      translatedText: '',
       partialSource: '',
       partialTranslation: '',
       turns: [...this.completedTurns],
       latencyMs: this.latencyTracker.getP50(),
-      status: 'listening',
+      status: options?.keepStatus ?? 'listening',
     });
 
-    this.draftTranslation = '';
-    this.awaitingCommit = false;
+    return turn;
   }
 
-  /** Mark translation in flight for an utterance */
-  beginFinalTranslation(utteranceId: number, sourceText: string): void {
-    if (!this.coordinator.isCurrent(utteranceId)) return;
-
-    this.coordinator.beginTranslation(utteranceId);
-    this.latencyTracker.markTurnEnd();
+  pause(langs?: { sourceLang: AppLanguage; targetLang: AppLanguage }): DialogueTurn | null {
+    const turn = this.commitCurrentTurn({
+      keepStatus: 'paused',
+      sourceLang: langs?.sourceLang,
+      targetLang: langs?.targetLang,
+    });
     this.patchState({
-      status: 'translating',
-      sourceTranscript: sourceText,
+      status: 'paused',
+      audioLevel: 0,
       partialSource: '',
       partialTranslation: '',
+      sourceTranscript: '',
+      translatedText: '',
     });
+    return turn;
   }
 
-  private handleInputDelta(event: RealtimeTranscriptDelta): void {
-    this.awaitingCommit = true;
-    this.currentSourceText += event.delta;
-    this.utteranceDetector.onSpeechActivity();
-    this.patchState({
-      partialSource: this.currentSourceText,
-      status: 'listening',
-    });
+  /** Hold-to-pause: mute input, keep live panels visible. */
+  enterHoldPause(): void {
+    if (this.state.status === 'paused') return;
+    this.patchState({ status: 'paused', audioLevel: 0 });
   }
 
-  /** Accumulate draft translation internally — never exposed to UI */
-  private handleOutputDelta(event: RealtimeTranscriptDelta): void {
-    this.draftTranslation += event.delta;
-  }
-
-  private handleInputDone(event: Record<string, unknown>): void {
-    const transcript =
-      typeof event.transcript === 'string' ? event.transcript.trim() : '';
-    const sourceText = transcript || this.currentSourceText.trim();
-    this.currentSourceText = '';
-    this.utteranceDetector.reset();
-
-    if (sourceText) {
-      this.commitUtterance(sourceText);
+  /** Release hold: commit finalized segment to history and clear live panels. */
+  releaseHoldPause(): DialogueTurn | null {
+    if (this.state.status !== 'paused' && !this.segmentLocked) return null;
+    if (this.segmentLocked) {
+      return this.commitFinalizedSegment({ keepStatus: 'listening' });
     }
+    return this.commitCurrentTurn({ keepStatus: 'listening' });
   }
 
-  private handleOutputDone(): void {
-    // Discard streaming draft — final translation comes from dedicated request
-    this.draftTranslation = '';
-  }
-
-  private commitUtteranceFromSilence(): void {
-    if (!this.awaitingCommit) return;
-
-    const sourceText = this.currentSourceText.trim();
-    if (!sourceText) return;
-
-    this.currentSourceText = '';
-    this.commitUtterance(sourceText);
-  }
-
-  private commitUtterance(sourceText: string): void {
-    if (!sourceText.trim()) return;
-
-    this.awaitingCommit = false;
-    this.utteranceDetector.reset();
-    this.draftTranslation = '';
-
-    const utteranceId = this.coordinator.nextUtteranceId();
-    this.beginFinalTranslation(utteranceId, sourceText);
-
-    this.onUtteranceReady?.({
-      utteranceId,
-      sourceText,
-      sourceLang: this.config.sourceLang,
-      targetLang: this.config.targetLang,
-    });
+  resume(): void {
+    if (this.state.status !== 'paused') return;
+    this.patchState({ status: 'listening', error: null });
   }
 
   swapLanguages(): { sourceLang: AppLanguage; targetLang: AppLanguage } {
@@ -244,18 +365,33 @@ export class TranslationSession {
   }
 
   stopListening(): void {
+    if (this.segmentLocked) {
+      this.commitFinalizedSegment({ keepStatus: 'idle' });
+    } else {
+      this.commitCurrentTurn({ keepStatus: 'idle' });
+    }
+    this.segmentLocked = false;
+    this.finalizedSourceText = '';
+    this.finalizedTranslationText = '';
     this.currentSourceText = '';
-    this.draftTranslation = '';
-    this.awaitingCommit = false;
-    this.utteranceDetector.reset();
+    this.currentTranslationText = '';
     this.reconnectAttempts = 0;
     this.patchState({
       status: 'idle',
       partialSource: '',
       partialTranslation: '',
+      sourceTranscript: '',
+      translatedText: '',
       audioLevel: 0,
       error: null,
     });
+  }
+
+  cancelSegmentFinalize(): void {
+    this.segmentLocked = false;
+    this.finalizedSourceText = '';
+    this.finalizedTranslationText = '';
+    this.patchState({ error: null });
   }
 
   hydrate(
@@ -280,12 +416,9 @@ export class TranslationSession {
   clearConversation(): void {
     this.contextBuffer.clear();
     this.completedTurns = [];
-    this.coordinator.reset();
     this.latencyTracker.reset();
     this.currentSourceText = '';
-    this.draftTranslation = '';
-    this.awaitingCommit = false;
-    this.utteranceDetector.reset();
+    this.currentTranslationText = '';
     this.reconnectAttempts = 0;
     this.state = createInitialState();
     this.emit();

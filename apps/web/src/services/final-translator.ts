@@ -5,7 +5,9 @@ export async function fetchFinalTranslation(
   request: TranslateRequest,
   signal?: AbortSignal,
 ): Promise<string> {
-  const response = await fetch(`${apiBaseUrl}/api/translate`, {
+  const origin =
+    apiBaseUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173');
+  const response = await fetch(`${origin}/api/translate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),

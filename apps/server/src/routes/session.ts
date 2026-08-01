@@ -41,8 +41,14 @@ export function createSessionRoutes(env: Env) {
 
     try {
       const sessionConfig = JSON.stringify({
+        type: 'translation',
         model: REALTIME_TRANSLATION_MODEL,
         audio: {
+          input: {
+            // Required for session.input_transcript.delta (Original panel)
+            transcription: { model: 'gpt-realtime-whisper' },
+            noise_reduction: { type: 'near_field' },
+          },
           output: { language: targetOpenAiLang },
         },
       });
@@ -126,8 +132,13 @@ export function createSessionRoutes(env: Env) {
           },
           body: JSON.stringify({
             session: {
+              type: 'translation',
               model: REALTIME_TRANSLATION_MODEL,
               audio: {
+                input: {
+                  transcription: { model: 'gpt-realtime-whisper' },
+                  noise_reduction: { type: 'near_field' },
+                },
                 output: {
                   language: targetOpenAiLang,
                 },

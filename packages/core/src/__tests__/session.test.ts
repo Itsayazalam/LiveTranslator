@@ -3,7 +3,6 @@ import { TurnBuffer } from '../turn-buffer.js';
 import { LatencyTracker } from '../latency-tracker.js';
 import { TranslationSession } from '../session.js';
 import { REALTIME_EVENTS } from '@live-translator/shared';
-import type { DialogueTurn } from '@live-translator/shared';
 
 describe('TurnBuffer', () => {
   it('caps turns at maxTurns', () => {
@@ -22,21 +21,6 @@ describe('TurnBuffer', () => {
     expect(buffer.size()).toBe(3);
     expect(buffer.getAll()[0]?.sourceText).toBe('source 2');
   });
-
-  it('builds context prompt from turns', () => {
-    const buffer = new TurnBuffer(10);
-    buffer.add({
-      id: '1',
-      sourceText: 'Hello',
-      translatedText: 'Namaste',
-      sourceLang: 'en-AU',
-      targetLang: 'hi',
-      completedAt: Date.now(),
-      latencyMs: 100,
-    });
-    expect(buffer.toContextPrompt()).toContain('Hello');
-    expect(buffer.toContextPrompt()).toContain('Namaste');
-  });
 });
 
 describe('LatencyTracker', () => {
@@ -50,17 +34,7 @@ describe('LatencyTracker', () => {
 });
 
 describe('TranslationSession', () => {
-  it('processes transcript delta events', () => {
-    const session = new TranslationSession();
-    session.handleRealtimeEvent({
-      type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DELTA,
-      delta: 'Hello',
-    });
-    expect(session.getState().partialSource).toBe('Hello');
-    expect(session.getState().status).toBe('listening');
-  });
-
-  it('does not expose streaming output translations in UI state', () => {
+  it('streams partial source only — ignores output deltas', () => {
     const session = new TranslationSession();
     session.handleRealtimeEvent({
       type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DELTA,
@@ -70,105 +44,103 @@ describe('TranslationSession', () => {
       type: REALTIME_EVENTS.OUTPUT_TRANSCRIPT_DELTA,
       delta: 'Namaste',
     });
+
+    expect(session.getState().partialSource).toBe('Hello');
     expect(session.getState().partialTranslation).toBe('');
-    expect(session.getState().translatedText).toBe('');
+    expect(session.getState().status).toBe('listening');
   });
 
-  it('fires onUtteranceReady on input done and applies final translation separately', () => {
-    const onUtteranceReady = vi.fn();
+  it('does not auto-commit on output done events', () => {
     const onTurnComplete = vi.fn();
-    const session = new TranslationSession({ onUtteranceReady, onTurnComplete });
+    const session = new TranslationSession({ onTurnComplete });
 
     session.handleRealtimeEvent({
       type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DELTA,
       delta: 'Hello world',
     });
+    session.handleRealtimeEvent({ type: REALTIME_EVENTS.OUTPUT_TRANSCRIPT_DONE });
+
+    expect(session.getState().turns).toHaveLength(0);
+    expect(onTurnComplete).not.toHaveBeenCalled();
+  });
+
+  it('finalizes segment with batch translation on commit', () => {
+    const onTurnComplete = vi.fn();
+    const session = new TranslationSession({ onTurnComplete });
+
     session.handleRealtimeEvent({
-      type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DONE,
-      transcript: 'Hello world',
+      type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DELTA,
+      delta: 'Hello',
     });
 
-    expect(onUtteranceReady).toHaveBeenCalledWith(
-      expect.objectContaining({
-        utteranceId: 1,
-        sourceText: 'Hello world',
-      }),
-    );
+    expect(session.beginSegmentFinalize()).toBe('Hello');
     expect(session.getState().status).toBe('translating');
-    expect(session.getState().translatedText).toBe('');
 
-    session.applyFinalTranslation(1, 'Namaste duniya', 'Hello world');
+    session.applyFinalTranslation('Namaste');
+    expect(session.getState().translatedText).toBe('Namaste');
+    expect(session.getState().status).toBe('paused');
 
-    expect(session.getState().sourceTranscript).toBe('Hello world');
-    expect(session.getState().translatedText).toBe('Namaste duniya');
-    expect(session.getState().status).toBe('listening');
+    session.commitFinalizedSegment();
+
+    const state = session.getState();
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0]?.sourceText).toBe('Hello');
+    expect(state.turns[0]?.translatedText).toBe('Namaste');
+    expect(state.partialSource).toBe('');
+    expect(state.translatedText).toBe('');
     expect(onTurnComplete).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores stale final translations', () => {
-    const session = new TranslationSession();
+  it('hold pause keeps source visible until release with finalized translation', () => {
+    const onTurnComplete = vi.fn();
+    const session = new TranslationSession({ onTurnComplete });
+
     session.handleRealtimeEvent({
       type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DELTA,
-      delta: 'First',
+      delta: 'Hello',
     });
-    session.handleRealtimeEvent({ type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DONE, transcript: 'First' });
-    session.handleRealtimeEvent({
-      type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DELTA,
-      delta: 'Second',
-    });
-    session.handleRealtimeEvent({ type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DONE, transcript: 'Second' });
 
-    session.applyFinalTranslation(1, 'Stale', 'First');
-    session.applyFinalTranslation(2, 'Dusra', 'Second');
+    session.enterHoldPause();
+    session.beginSegmentFinalize();
+    session.applyFinalTranslation('Namaste');
 
-    expect(session.getState().translatedText).toBe('Dusra');
-    expect(session.getState().turns).toHaveLength(1);
+    let state = session.getState();
+    expect(state.status).toBe('paused');
+    expect(state.partialSource).toBe('Hello');
+    expect(state.translatedText).toBe('Namaste');
+    expect(state.turns).toHaveLength(0);
+
+    session.releaseHoldPause();
+
+    state = session.getState();
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0]?.translatedText).toBe('Namaste');
+    expect(onTurnComplete).toHaveBeenCalledTimes(1);
   });
 
-  it('swaps languages', () => {
+  it('swapLanguages flips config', () => {
     const session = new TranslationSession({
-      config: { sourceLang: 'en-AU', targetLang: 'hi', silenceDurationMs: 700, maxTurns: 5 },
+      config: { sourceLang: 'en-AU', targetLang: 'hi' },
     });
     const swapped = session.swapLanguages();
-    expect(swapped.sourceLang).toBe('hi');
-    expect(swapped.targetLang).toBe('en-AU');
+    expect(swapped).toEqual({ sourceLang: 'hi', targetLang: 'en-AU' });
+    expect(session.getConfig().sourceLang).toBe('hi');
+    expect(session.getConfig().targetLang).toBe('en-AU');
   });
 
-  it('stopListening preserves conversation', () => {
+  it('stopListening commits finalized segment', () => {
     const session = new TranslationSession();
     session.handleRealtimeEvent({
       type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DELTA,
       delta: 'Hello',
     });
-    session.handleRealtimeEvent({ type: REALTIME_EVENTS.INPUT_TRANSCRIPT_DONE, transcript: 'Hello' });
-    session.applyFinalTranslation(1, 'Namaste', 'Hello');
+    session.beginSegmentFinalize();
+    session.applyFinalTranslation('Namaste');
 
     session.stopListening();
     const state = session.getState();
     expect(state.status).toBe('idle');
     expect(state.turns).toHaveLength(1);
-    expect(state.sourceTranscript).toBe('Hello');
-    expect(state.translatedText).toBe('Namaste');
-  });
-
-  it('hydrates persisted turns', () => {
-    const session = new TranslationSession();
-    session.hydrate(
-      [
-        {
-          id: '1',
-          sourceText: 'Hi',
-          translatedText: 'Namaste',
-          sourceLang: 'en-AU',
-          targetLang: 'hi',
-          completedAt: Date.now(),
-          latencyMs: 100,
-        },
-      ],
-      'Hi',
-      'Namaste',
-    );
-    expect(session.getState().turns).toHaveLength(1);
-    expect(session.getState().sourceTranscript).toBe('Hi');
+    expect(state.translatedText).toBe('');
   });
 });

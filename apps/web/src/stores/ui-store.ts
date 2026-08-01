@@ -12,7 +12,16 @@ import { conversationRepository } from '../services/conversation-repository';
 function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const stored = JSON.parse(raw) as Partial<AppSettings> & { autoDetect?: boolean };
+      const { autoDetect: _legacyAutoDetect, ...rest } = stored;
+      const parsed = { ...DEFAULT_SETTINGS, ...rest } as AppSettings;
+      // Prefer same-origin Vite proxy in dev instead of hard-coded localhost:3001
+      if (parsed.apiBaseUrl === 'http://localhost:3001') {
+        parsed.apiBaseUrl = '';
+      }
+      return parsed;
+    }
   } catch {
     // ignore
   }

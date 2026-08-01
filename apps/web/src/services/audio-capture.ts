@@ -30,6 +30,12 @@ export class AudioCaptureService {
     return this.stream;
   }
 
+  setMuted(muted: boolean): void {
+    this.stream?.getAudioTracks().forEach((track) => {
+      track.enabled = !muted;
+    });
+  }
+
   stop(): void {
     if (this.animationFrame !== null) {
       cancelAnimationFrame(this.animationFrame);

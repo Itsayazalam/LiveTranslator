@@ -1,4 +1,5 @@
 import type { AppLanguage } from '@live-translator/shared';
+import { normalizeRealtimeEvent, toSessionEvent } from '@live-translator/shared';
 
 const ICE_GATHERING_TIMEOUT_MS = 5_000;
 const DATA_CHANNEL_OPEN_TIMEOUT_MS = 15_000;
@@ -83,15 +84,23 @@ export class WebRTCClient {
     }
     this.pc.addTrack(audioTrack, localStream);
 
-    this.dataChannel = this.pc.createDataChannel('oai-events');
-    this.dataChannel.onmessage = ({ data }) => {
-      try {
-        const event = JSON.parse(data as string) as Record<string, unknown>;
-        options.onEvent(event);
-      } catch {
-        // ignore malformed events
+    // Receive remote tracks for WebRTC negotiation, but never play them —
+    // this app is text-only (subtitles), not spoken interpretation.
+    this.pc.ontrack = (event) => {
+      for (const track of event.streams.flatMap((s) => s.getTracks())) {
+        track.enabled = false;
+      }
+      for (const track of event.track ? [event.track] : []) {
+        track.enabled = false;
       }
     };
+
+    this.pc.ondatachannel = (event) => {
+      this.bindDataChannel(event.channel, options);
+    };
+
+    this.dataChannel = this.pc.createDataChannel('oai-events');
+    this.bindDataChannel(this.dataChannel, options);
 
     this.pc.onconnectionstatechange = () => {
       const state = this.pc?.connectionState;
@@ -129,27 +138,38 @@ export class WebRTCClient {
     this.pc = null;
   }
 
-  sendEvent(event: Record<string, unknown>): void {
-    if (this.dataChannel?.readyState === 'open') {
-      this.dataChannel.send(JSON.stringify(event));
+  private bindDataChannel(channel: RTCDataChannel, options: WebRTCClientOptions): void {
+    // OpenAI may deliver events on the client-created or server-created channel
+    if (channel.label !== 'oai-events') return;
+
+    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+      this.dataChannel = channel;
     }
+
+    channel.onmessage = ({ data }) => {
+      try {
+        const raw = JSON.parse(data as string) as Record<string, unknown>;
+        const normalized = normalizeRealtimeEvent(raw);
+        const sessionEvent =
+          normalized.kind === 'other' ? raw : toSessionEvent(normalized);
+        if (import.meta.env.DEV) {
+          console.debug('[realtime]', normalized.type, normalized.kind, normalized.delta || '');
+        }
+        options.onEvent(sessionEvent);
+      } catch {
+        // ignore malformed events
+      }
+    };
   }
 
-  updateContext(contextPrompt: string): void {
-    this.sendEvent({
-      type: 'session.update',
-      session: {
-        instructions: `Previous conversation context:\n${contextPrompt}`,
-      },
-    });
-  }
-
-  /** Proxy SDP through our server (unified interface) — avoids browser→OpenAI 504s */
   private async exchangeSdpViaServer(
     sdp: string,
     options: WebRTCClientOptions,
   ): Promise<string> {
-    const url = new URL(`${options.apiBaseUrl}/api/calls`);
+    const origin =
+      options.apiBaseUrl ||
+      (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173');
+    const url = new URL('/api/calls', origin);
     url.searchParams.set('sourceLang', options.sourceLang);
     url.searchParams.set('targetLang', options.targetLang);
 
@@ -189,7 +209,6 @@ export class WebRTCClient {
 
         lastError = new Error(message);
 
-        // Retry on 502/503/504
         if (response.status >= 502 && response.status <= 504 && attempt < SDP_RETRY_ATTEMPTS - 1) {
           continue;
         }

@@ -45,11 +45,18 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </div>
 
         <div className="space-y-4">
-          <Field label="Source language">
+          <Field label="Starting language (you speak)">
             <select
               value={local.sourceLang}
               onChange={(e) =>
-                setLocal({ ...local, sourceLang: e.target.value as AppLanguage })
+                setLocal({
+                  ...local,
+                  sourceLang: e.target.value as AppLanguage,
+                  targetLang:
+                    e.target.value === 'en-AU'
+                      ? 'hi'
+                      : 'en-AU',
+                })
               }
               className="input"
             >
@@ -61,21 +68,11 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             </select>
           </Field>
 
-          <Field label="Target language">
-            <select
-              value={local.targetLang}
-              onChange={(e) =>
-                setLocal({ ...local, targetLang: e.target.value as AppLanguage })
-              }
-              className="input"
-            >
-              {(Object.keys(LANGUAGE_LABELS) as AppLanguage[]).map((lang) => (
-                <option key={lang} value={lang}>
-                  {LANGUAGE_LABELS[lang]}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <p className="text-xs text-muted">
+            Translation direction alternates each time you release Space. Starting
+            direction: {LANGUAGE_LABELS[local.sourceLang]} →{' '}
+            {LANGUAGE_LABELS[local.targetLang]}.
+          </p>
 
           <Field label="Microphone">
             <select

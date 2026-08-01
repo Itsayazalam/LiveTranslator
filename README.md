@@ -1,6 +1,14 @@
 # Live AI Interpreter
 
-Real-time Australian English ↔ Hindi translation powered by OpenAI Realtime Translation API.
+**MVP ready** — Real-time Australian English ↔ Hindi interpreter powered by OpenAI Realtime Translation API.
+
+## How it works
+
+1. **Start** the session and speak — the Original panel streams your speech as text.
+2. **Press Space** — runs a full-sentence translation (no word-by-word preview).
+3. **Release Space** — saves the turn to history and flips direction (EN → HI ↔ HI → EN).
+
+Translation uses batch GPT (`/api/translate`) for natural Hindi/English; WebRTC is used for live speech-to-text only.
 
 ## Architecture
 
@@ -61,7 +69,8 @@ OPENAI_API_KEY=sk-... pnpm spike
 
 | Shortcut | Action |
 |----------|--------|
-| `Space` | Start / stop session |
+| `Space` (press) | Translate current segment |
+| `Space` (release) | Finish segment and flip direction |
 | `Cmd+L` | Swap languages |
 | `Cmd+Shift+C` | Copy translation |
 

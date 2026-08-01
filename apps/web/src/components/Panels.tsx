@@ -10,6 +10,7 @@ interface TranscriptPanelProps {
 
 export function TranscriptPanel({ label, text, partial, lang, isActive }: TranscriptPanelProps) {
   const displayText = partial || text;
+  const placeholder = isActive ? 'Waiting for speech…' : 'Press Start to begin interpreting';
 
   return (
     <section className="flex flex-col gap-2 rounded-xl border border-border bg-surface-raised p-5 min-h-[140px]">
@@ -17,11 +18,9 @@ export function TranscriptPanel({ label, text, partial, lang, isActive }: Transc
         <h2 className="text-sm font-medium text-muted uppercase tracking-wide">{label}</h2>
         <span className="text-xs text-muted/60">{lang}</span>
       </div>
-      <p className="text-lg leading-relaxed whitespace-pre-wrap">
+      <p className="text-lg leading-relaxed whitespace-pre-wrap text-white">
         {displayText || (
-          <span className="text-muted/40 italic">
-            {isActive ? 'Waiting for speech…' : 'Press Start to begin interpreting'}
-          </span>
+          <span className="text-muted/40 italic">{placeholder}</span>
         )}
         {partial && (
           <span className="inline-block w-0.5 h-5 bg-accent ml-0.5 animate-pulse align-middle" />
@@ -33,29 +32,41 @@ export function TranscriptPanel({ label, text, partial, lang, isActive }: Transc
 
 interface TranslationPanelProps {
   text: string;
+  partial: string;
   lang: string;
-  status: SessionState['status'];
   onCopy: () => void;
   isActive: boolean;
+  isTranslating: boolean;
 }
 
-export function TranslationPanel({ text, lang, status, onCopy, isActive }: TranslationPanelProps) {
-  const placeholder =
-    status === 'translating'
-      ? '🟢 Translating…'
-      : isActive
-        ? 'Waiting for complete sentence…'
-        : 'Your translations are saved below';
+export function TranslationPanel({
+  text,
+  partial,
+  lang,
+  onCopy,
+  isActive,
+  isTranslating,
+}: TranslationPanelProps) {
+  const displayText = partial || text;
+
+  const placeholder = (() => {
+    if (!isActive) return 'Your translations are saved below';
+    if (isTranslating) return 'Translating…';
+    return 'Press Space to translate';
+  })();
 
   return (
-    <section className="flex flex-col gap-2 rounded-xl border border-accent/30 bg-surface-raised p-5 min-h-[140px]">
+    <section
+      className="flex flex-col gap-2 rounded-xl border border-accent/30 bg-surface-raised p-5 min-h-[140px]"
+      data-testid="translation-panel"
+    >
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium text-accent uppercase tracking-wide">
           Translation
         </h2>
         <div className="flex items-center gap-2">
           <span className="text-xs text-muted/60">{lang}</span>
-          {text && (
+          {displayText && !isTranslating && (
             <button
               onClick={onCopy}
               className="text-xs px-2 py-1 rounded-md bg-border hover:bg-accent/20 transition-colors"
@@ -66,8 +77,11 @@ export function TranslationPanel({ text, lang, status, onCopy, isActive }: Trans
           )}
         </div>
       </div>
-      <p className="text-xl leading-relaxed font-medium whitespace-pre-wrap">
-        {text || (
+      <p
+        className="text-xl leading-relaxed font-medium whitespace-pre-wrap text-white min-h-[1.75rem]"
+        data-testid="translation-display"
+      >
+        {displayText || (
           <span className="text-muted/40 italic font-normal">{placeholder}</span>
         )}
       </p>
@@ -83,8 +97,10 @@ interface ConversationHistoryProps {
 export function ConversationHistory({ turns, onClear }: ConversationHistoryProps) {
   if (turns.length === 0) return null;
 
+  const ordered = [...turns].reverse();
+
   return (
-    <section className="mt-2 flex flex-col gap-3">
+    <section className="mt-2 flex flex-col gap-3" data-testid="conversation-history">
       <div className="flex items-center justify-between">
         <h3 className="text-xs text-muted uppercase tracking-wide">
           Conversation ({turns.length} {turns.length === 1 ? 'turn' : 'turns'})
@@ -97,7 +113,7 @@ export function ConversationHistory({ turns, onClear }: ConversationHistoryProps
         </button>
       </div>
       <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-        {turns.map((turn) => (
+        {ordered.map((turn) => (
           <TurnCard key={turn.id} turn={turn} />
         ))}
       </div>
@@ -131,15 +147,24 @@ function TurnCard({ turn }: { turn: DialogueTurn }) {
 interface StatusBarProps {
   state: SessionState;
   isActive: boolean;
+  isPaused: boolean;
   onToggle: () => void;
+  onFinishSegment: () => void;
 }
 
-export function StatusBar({ state, isActive, onToggle }: StatusBarProps) {
+export function StatusBar({
+  state,
+  isActive,
+  isPaused,
+  onToggle,
+  onFinishSegment,
+}: StatusBarProps) {
   const statusLabel: Record<SessionState['status'], string> = {
     idle: 'Ready',
     connecting: 'Connecting…',
     listening: '🟡 Listening…',
     translating: '🟢 Translating…',
+    paused: '⏸ Paused',
     error: 'Error',
     reconnecting: 'Reconnecting…',
   };
@@ -149,6 +174,7 @@ export function StatusBar({ state, isActive, onToggle }: StatusBarProps) {
     connecting: 'text-yellow-400',
     listening: 'text-yellow-400',
     translating: 'text-success',
+    paused: 'text-muted',
     error: 'text-danger',
     reconnecting: 'text-yellow-400',
   };
@@ -173,11 +199,21 @@ export function StatusBar({ state, isActive, onToggle }: StatusBarProps) {
           {isActive ? 'Stop' : 'Start'}
         </button>
 
+        {isActive && (
+          <button
+            onClick={onFinishSegment}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-full font-medium transition-all border border-border hover:bg-surface-raised"
+            title="Finish segment and flip direction"
+          >
+            Finish
+          </button>
+        )}
+
         <span className={`text-sm ${statusColor[state.status]}`}>
           {statusLabel[state.status]}
         </span>
 
-        {state.audioLevel > 0 && isActive && (
+        {state.audioLevel > 0 && isActive && !isPaused && (
           <div className="flex items-end gap-0.5 h-4">
             {Array.from({ length: 8 }).map((_, i) => (
               <div
@@ -200,7 +236,7 @@ export function StatusBar({ state, isActive, onToggle }: StatusBarProps) {
           </span>
         )}
         <span className="text-xs text-muted/50 hidden sm:inline">
-          Space: toggle · Cmd+L: swap · Cmd+Shift+C: copy
+          Space: translate · Release: finish · Cmd+L: swap
         </span>
       </div>
     </footer>
